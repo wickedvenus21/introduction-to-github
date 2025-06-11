@@ -1,0 +1,222 @@
+Const wdAlignRowCenter As Long = 1
+
+Sub GenerateAccurateManifest()
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Sheets("Arrivals & Departures")
+    Dim wdApp As Object, wdDoc As Object
+    Dim lastRow As Long: lastRow = ws.Cells(ws.rows.Count, "B").End(xlUp).row
+
+    On Error Resume Next
+    Set wdApp = GetObject(, "Word.Application")
+    If wdApp Is Nothing Then Set wdApp = CreateObject("Word.Application")
+    On Error GoTo 0
+    If wdApp Is Nothing Then MsgBox "Word could not be launched": Exit Sub
+
+    wdApp.Visible = True
+    Set wdDoc = wdApp.Documents.Add
+    With wdDoc.PageSetup
+        .TopMargin = wdApp.InchesToPoints(0.5)
+        .BottomMargin = wdApp.InchesToPoints(0.5)
+        .LeftMargin = wdApp.InchesToPoints(0.5)
+        .RightMargin = wdApp.InchesToPoints(0.5)
+    End With
+
+    Dim arrivalGroups As Object: Set arrivalGroups = CreateObject("Scripting.Dictionary")
+    Dim departureGroups As Object: Set departureGroups = CreateObject("Scripting.Dictionary")
+    Dim i As Long
+
+    For i = 2 To lastRow
+        If Trim(ws.Cells(i, 2).Value) <> "" Then
+            Dim groupA As String: groupA = Trim(ws.Cells(i, 10).Value)
+            Dim groupD As String: groupD = Trim(ws.Cells(i, 20).Value)
+            If groupA = "" Then groupA = "INDIVIDUAL_ARRIVALS"
+            If Not arrivalGroups.Exists(groupA) Then Set arrivalGroups(groupA) = New Collection
+            arrivalGroups(groupA).Add i
+            If groupD = "" Then groupD = "INDIVIDUAL_DEPARTURES"
+            If Not departureGroups.Exists(groupD) Then Set departureGroups(groupD) = New Collection
+            departureGroups(groupD).Add i
+        End If
+    Next i
+
+    ExportGroupedData arrivalGroups, wdDoc, ws, wdApp, True
+    wdDoc.Paragraphs.Last.Range.InsertParagraphAfter
+    ExportGroupedData departureGroups, wdDoc, ws, wdApp, False
+
+    MsgBox "Manifest created successfully!", vbInformation
+End Sub
+
+Sub ExportGroupedData(groupDict As Object, wdDoc As Object, ws As Worksheet, wdApp As Object, isArrival As Boolean)
+    Dim dataList As New Collection, labelList As New Collection
+    Dim key As Variant
+
+    For Each key In groupDict.Keys
+        Dim rows As Collection: Set rows = groupDict(key)
+        Dim groupData As New Collection
+        Dim r As Variant
+
+        For Each r In rows
+            Dim entry(1 To 10)
+            entry(1) = ToTitleCase(ws.Cells(r, 2).Value & " " & ws.Cells(r, 3).Value)
+            If isArrival Then
+                entry(2) = Format(ws.Cells(r, 5).Value, "ddd") & "," & vbCrLf & Format(ws.Cells(r, 5).Value, "mm/dd")
+                entry(3) = Format(ws.Cells(r, 6).Value, "h:mm AM/PM")
+                entry(4) = ToTitleCase(ProperLocation(ws.Cells(r, 9).Value, ws.Cells(r, 7).Value))
+                entry(5) = GetFlightCode(ws.Cells(r, 7).Value) & ws.Cells(r, 8).Value
+                entry(6) = ToTitleCase(ProperDestination(ws.Cells(r, 1).Value))
+                entry(7) = ""
+                entry(8) = ws.Cells(r, 11).Value
+                entry(9) = ws.Cells(r, 5).Value
+                entry(10) = ws.Cells(r, 6).Value
+            Else
+                entry(2) = Format(ws.Cells(r, 14).Value, "ddd") & "," & vbCrLf & Format(ws.Cells(r, 14).Value, "mm/dd")
+                entry(3) = Format(ws.Cells(r, 16).Value, "h:mm AM/PM")
+                entry(4) = ToTitleCase(ProperDestination(ws.Cells(r, 13).Value))
+                entry(5) = GetFlightCode(ws.Cells(r, 17).Value) & ws.Cells(r, 18).Value
+                entry(6) = ToTitleCase(ProperLocation(ws.Cells(r, 21).Value, ws.Cells(r, 17).Value))
+                entry(7) = ""
+                entry(8) = ws.Cells(r, 20).Value
+                entry(9) = ws.Cells(r, 14).Value
+                entry(10) = ws.Cells(r, 16).Value
+            End If
+            groupData.Add entry
+        Next r
+
+        SortGroupByDateTime groupData
+        dataList.Add groupData
+        labelList.Add key
+    Next key
+
+    BuildLabeledManifest wdDoc, isArrival, dataList, labelList, wdApp
+End Sub
+
+Sub SortGroupByDateTime(groupData As Collection)
+    Dim i As Long, j As Long, temp, arr() As Variant
+    ReDim arr(1 To groupData.Count)
+    For i = 1 To groupData.Count: arr(i) = groupData(i): Next
+    For i = 1 To UBound(arr) - 1
+        For j = i + 1 To UBound(arr)
+            If arr(i)(9) > arr(j)(9) Or (arr(i)(9) = arr(j)(9) And arr(i)(10) > arr(j)(10)) Then
+                temp = arr(i): arr(i) = arr(j): arr(j) = temp
+            End If
+        Next j
+    Next i
+    groupData.Clear: For i = 1 To UBound(arr): groupData.Add arr(i): Next
+End Sub
+
+Sub BuildLabeledManifest(doc As Object, isArrival As Boolean, dataList As Collection, labelList As Collection, wdApp As Object)
+    Dim title As String: title = IIf(isArrival, "ARRIVAL", "DEPARTURE")
+    Dim headers: headers = Array("NAME", "DAY & DATE", "PICK UP TIME", "PICK UP LOCATION", "AIRLINE/ FLIGHT #", "DESTINATION", "# PP", "CONF #")
+
+    ' === SECTION TITLE ===
+    Dim pTitle As Object: Set pTitle = doc.Paragraphs.Add
+    With pTitle.Range
+        .text = title
+        .Font.name = "Calibri"
+        .Font.Size = 14
+        .Font.Bold = True
+        .ParagraphFormat.Alignment = wdAlignRowCenter
+        .ParagraphFormat.SpaceBefore = 0
+        .ParagraphFormat.SpaceAfter = 0
+        .InsertParagraphAfter
+    End With
+
+    Dim g As Long, i As Long, j As Long
+    For g = 1 To dataList.Count
+        ' === GROUP LABEL ===
+        Dim labelText As String: labelText = labelList(g)
+        Dim displayLabel As String: displayLabel = IIf(InStr(labelText, "INDIVIDUAL") > 0, Replace(labelText, "_", " "), "GROUP #" & g)
+
+        Dim pGroup As Object: Set pGroup = doc.Paragraphs.Add
+        With pGroup.Range
+            .text = displayLabel
+            .Font.name = "Calibri"
+            .Font.Size = 12
+            .Font.Bold = True
+            .ParagraphFormat.SpaceBefore = 0
+            .ParagraphFormat.SpaceAfter = 0
+            .InsertParagraphAfter
+        End With
+
+        Dim groupData As Collection: Set groupData = dataList(g)
+        Dim tbl As Object: Set tbl = doc.Tables.Add(doc.Paragraphs.Last.Range, groupData.Count + 1, 8)
+        tbl.PreferredWidth = wdApp.InchesToPoints(7.81)
+        tbl.AllowAutoFit = False
+        tbl.Borders.Enable = True
+
+        ' === CENTER ALL CELLS ===
+        Dim c As Object
+        For Each c In tbl.Range.Cells
+            c.Range.ParagraphFormat.Alignment = wdAlignRowCenter
+        Next c
+
+        ' === HEADER ROW ===
+        For j = 0 To 7
+            With tbl.Cell(1, j + 1).Range
+                .text = headers(j)
+                .Font.name = "Calibri"
+                .Font.Size = 11
+                .Font.Bold = True
+                .ParagraphFormat.Alignment = wdAlignRowCenter
+                .ParagraphFormat.SpaceBefore = 6
+                .ParagraphFormat.SpaceAfter = 0
+            End With
+            tbl.Cell(1, j + 1).Shading.BackgroundPatternColor = RGB(200, 200, 200)
+        Next j
+
+        ' === TABLE ROWS ===
+        For i = 1 To groupData.Count
+            For j = 0 To 7
+                With tbl.Cell(i + 1, j + 1).Range
+                    .text = groupData(i)(j + 1)
+                    .Font.name = "Calibri"
+                    .Font.Size = 11
+                    .ParagraphFormat.Alignment = wdAlignRowCenter
+                    .ParagraphFormat.SpaceBefore = 6
+                    .ParagraphFormat.SpaceAfter = 6
+                End With
+            Next j
+        Next i
+    Next g
+End Sub
+
+
+Function ToTitleCase(text As String) As String
+    ToTitleCase = StrConv(LCase(text), vbProperCase)
+End Function
+
+Function GetFlightCode(name As String) As String
+    Dim codeMap As Object: Set codeMap = CreateObject("Scripting.Dictionary")
+    codeMap.Add "Jetblue", "B6": codeMap.Add "Jet Blue", "B6": codeMap.Add "JB", "B6"
+    codeMap.Add "JSX", "JSX": codeMap.Add "XE", "JSX"
+    codeMap.Add "Delta", "DL": codeMap.Add "Delta Airlines", "DL": codeMap.Add "DL", "DL"
+    codeMap.Add "American Airlines", "AA": codeMap.Add "AA", "AA": codeMap.Add "American", "AA"
+    codeMap.Add "Southwest", "WN": codeMap.Add "SW", "WN": codeMap.Add "WN", "WN"
+    codeMap.Add "Spirit", "NK": codeMap.Add "NK", "NK"
+    codeMap.Add "Alaska", "AS": codeMap.Add "AS", "AS"
+    codeMap.Add "Frontier", "F9": codeMap.Add "F9", "F9"
+    codeMap.Add "Air France", "AF": codeMap.Add "AF", "AF"
+    codeMap.Add "United", "UA": codeMap.Add "United Airlines", "UA": codeMap.Add "United Air", "UA": codeMap.Add "UA", "UA"
+    If codeMap.Exists(name) Then GetFlightCode = codeMap(name) Else GetFlightCode = name
+End Function
+
+Function ProperLocation(loc As String, air As String) As String
+    loc = LCase(Trim(loc))
+    loc = Replace(loc, "mccarran", "Harry Reid International")
+    loc = Replace(loc, "harry reid", "Harry Reid International")
+    If UCase(loc) = "JSX" Or UCase(air) = "JSX" Then
+        ProperLocation = "JSX"
+    ElseIf InStr(loc, "t1") = 0 And InStr(loc, "t3") = 0 Then
+        Dim term As String: term = IIf(GetFlightCode(air) = "B6" Or GetFlightCode(air) = "UA", "T3", "T1")
+        ProperLocation = "Harry Reid International – " & term
+    Else
+        ProperLocation = ToTitleCase(loc)
+    End If
+End Function
+
+Function ProperDestination(dest As String) As String
+    If UCase(dest) = "MGM" Then
+        ProperDestination = "Main Entrance"
+    Else
+        ProperDestination = ToTitleCase(dest)
+    End If
+End Function
+
